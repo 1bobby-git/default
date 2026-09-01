@@ -6,11 +6,9 @@ on:
       - analysis/apti-emulator-20260901
     paths:
       - .github/workflows/apti-emulator-probe.yml
-      - scripts/apti-static-probe.sh
-      - scripts/apti-runtime-probe.sh
-      - scripts/apti-frida-hook.js
-      - scripts/apti-cdp-capture.py
-      - scripts/apti-mitm-addon.py
+      - scripts/apti-version-spoof.js
+      - scripts/apti-frida-runner.py
+      - scripts/apti-ui-discovery.sh
   workflow_dispatch:
 
 permissions:
@@ -20,27 +18,9 @@ env:
   APTI_VERSION: "3.3.45"
 
 jobs:
-  static-analysis:
+  ui-discovery:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download and analyze Apti APK
-        run: |
-          chmod +x scripts/apti-static-probe.sh
-          scripts/apti-static-probe.sh
-      - name: Upload text-only static analysis
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: apti-static-analysis-v2
-          path: apti-analysis/
-          if-no-files-found: warn
-          retention-days: 1
-
-  android-emulator:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - name: Enable KVM
@@ -49,7 +29,7 @@ jobs:
             sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Boot Android 11 and probe Apti
+      - name: Boot Android 11, spoof current version and inspect UI
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 30
@@ -61,13 +41,13 @@ jobs:
             -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
             -camera-back none -camera-front none
           script: |
-            chmod +x scripts/apti-runtime-probe.sh
-            scripts/apti-runtime-probe.sh
-      - name: Upload runtime logs and screenshots
+            chmod +x scripts/apti-ui-discovery.sh
+            scripts/apti-ui-discovery.sh
+      - name: Upload UI discovery results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: apti-android-runtime
-          path: apti-runtime-results/
+          name: apti-ui-discovery
+          path: apti-ui-discovery-results/
           if-no-files-found: warn
           retention-days: 1

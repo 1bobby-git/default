@@ -1,0 +1,34 @@
+name: Temporary Apti Android probe
+
+on:
+  push:
+    branches:
+      - analysis/apti-emulator-20260901
+    paths:
+      - .github/workflows/apti-emulator-probe.yml
+      - scripts/apti-static-probe.sh
+      - scripts/apti-runtime-probe.sh
+      - scripts/apti-frida-hook.js
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and analyze Apti APK
+        run: |
+          chmod +x scripts/apti-static-probe.sh
+          scripts/apti-static-probe.sh
+      - name: Upload text-only static analysis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apti-static-analysis
+          path: apti-analysis/
+          if-no-files-found: warn
+          retention-days: 1

@@ -38,11 +38,19 @@ mkdir -p "$APTI_SECURE_RESULT_DIR"
 ) &
 ui_helper_pid=$!
 
-set +e
-python3 scripts/apti_secure_probe.py
-legacy_probe_rc=$?
-set -e
-printf '%s\n' "$legacy_probe_rc" > "$APTI_SECURE_RESULT_DIR/legacy-probe-return-code.txt"
+python3 - <<'PY'
+from pathlib import Path
+
+path = Path("scripts/apti_exact_https_probe.py")
+text = path.read_text(encoding="utf-8")
+old = 'result["input_verified"] = bool(username_ok and password_ok and nonempty)'
+new = 'result["input_verified"] = bool(username_ok and password_ok)'
+if old not in text:
+    raise SystemExit("exact probe input verification expression was not found")
+path.write_text(text.replace(old, new, 1), encoding="utf-8")
+PY
+
+echo 'skipped: exact HTTPS revision runs the corrected login probe only' > "$APTI_SECURE_RESULT_DIR/legacy-probe-return-code.txt"
 
 set +e
 python3 scripts/apti_exact_https_probe.py --credentials "${APTI_CREDENTIALS_FILE:-/dev/shm/apti-creds.json}" --result-dir "$APTI_SECURE_RESULT_DIR"

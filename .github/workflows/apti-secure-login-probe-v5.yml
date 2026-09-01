@@ -1,0 +1,165 @@
+name: Temporary secure Apti clean-login exact HTTPS probe v5
+
+on:
+  push:
+    branches:
+      - analysis/apti-emulator-20260901
+    paths:
+      - .github/workflows/apti-secure-login-probe-v5.yml
+      - scripts/apti_v5_variant.py
+      - scripts/apti_v5_wrapper.sh
+      - scripts/apti_v5_publish_result.py
+      - scripts/apti_v4_exchange_server.py
+      - scripts/apti_v4_probe.py
+      - scripts/apti_v4_cdp.py
+      - scripts/apti_v4_frida.js
+  workflow_dispatch:
+
+concurrency:
+  group: apti-v5-authenticated-probe
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  APTI_XAPK_URL: https://d.apkpure.net/b/XAPK/aptip.app?version=latest
+  APTI_XAPK_SHA256: 5484493059885e8ae8d070a147e47459238eeafde2eb8d6737d9ed756510744b
+  APTI_CREDENTIALS_FILE: /dev/shm/apti-creds.json
+  APTI_RESULT_KEY_FILE: /dev/shm/apti-result-key.bin
+  APTI_EXCHANGE_PRIVATE_KEY: /dev/shm/apti-v5/private.pem
+  APTI_EXCHANGE_DONE_FILE: /dev/shm/apti-v5/exchange.done
+  APTI_EXCHANGE_PORT: "8766"
+
+jobs:
+  secure-clean-login-and-exact-url:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Open one-time encrypted credential channel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          mkdir -p /dev/shm/apti-v5
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out /dev/shm/apti-v5/private.pem
+          openssl pkey -in /dev/shm/apti-v5/private.pem -pubout -out /dev/shm/apti-v5/public.pem
+          nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          export APTI_EXCHANGE_NONCE="$nonce"
+          echo "APTI_EXCHANGE_NONCE=$nonce" >> "$GITHUB_ENV"
+
+          python3 scripts/apti_v4_exchange_server.py > /dev/shm/apti-v5/server.log 2>&1 &
+          server_pid=$!
+          curl -fL --retry 5 \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o /dev/shm/apti-v5/cloudflared
+          chmod 700 /dev/shm/apti-v5/cloudflared
+          /dev/shm/apti-v5/cloudflared tunnel --no-autoupdate \
+            --url "http://127.0.0.1:${APTI_EXCHANGE_PORT}" \
+            --logfile /dev/shm/apti-v5/cloudflared.log --loglevel info \
+            > /dev/shm/apti-v5/cloudflared.stdout 2>&1 &
+          tunnel_pid=$!
+
+          tunnel_url=""
+          for _ in $(seq 1 120); do
+            tunnel_url="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' \
+              /dev/shm/apti-v5/cloudflared.log /dev/shm/apti-v5/cloudflared.stdout 2>/dev/null | tail -1 || true)"
+            if [[ -n "$tunnel_url" ]] && curl -fsS --max-time 10 "$tunnel_url/healthz" -o /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          [[ -n "$tunnel_url" ]] || { echo 'Unable to establish encrypted credential tunnel.'; exit 40; }
+
+          rm -rf apti-handshake-v5
+          mkdir -p apti-handshake-v5
+          TUNNEL_URL="$tunnel_url" NONCE="$nonce" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          metadata = {
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'nonce': os.environ['NONCE'],
+              'submit_url': os.environ['TUNNEL_URL'].rstrip('/') + '/submit/' + os.environ['NONCE'],
+              'public_key_pem': Path('/dev/shm/apti-v5/public.pem').read_text(encoding='utf-8'),
+              'expires_in_seconds': 900,
+          }
+          Path('apti-handshake-v5/metadata.json').write_text(json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git pull --rebase origin analysis/apti-emulator-20260901
+          git add apti-handshake-v5/metadata.json
+          git commit -m "Publish one-time Apti v5 credential channel ${GITHUB_RUN_ID}"
+          git push origin HEAD:analysis/apti-emulator-20260901
+
+          received=0
+          for _ in $(seq 1 900); do
+            if [[ -s /dev/shm/apti-creds.json && -s /dev/shm/apti-result-key.bin ]]; then
+              received=1
+              break
+            fi
+            sleep 1
+          done
+          [[ "$received" -eq 1 ]] || { echo 'Encrypted credentials were not received.'; exit 41; }
+
+          apti_user="$(python3 -c 'import json; print(json.load(open("/dev/shm/apti-creds.json"))["username"])')"
+          apti_pass="$(python3 -c 'import json; print(json.load(open("/dev/shm/apti-creds.json"))["password"])')"
+          echo "::add-mask::$apti_user"
+          echo "::add-mask::$apti_pass"
+          kill "$tunnel_pid" "$server_pid" >/dev/null 2>&1 || true
+          wait "$tunnel_pid" "$server_pid" >/dev/null 2>&1 || true
+          rm -f /dev/shm/apti-v5/cloudflared /dev/shm/apti-v5/cloudflared.log \
+            /dev/shm/apti-v5/cloudflared.stdout /dev/shm/apti-v5/server.log \
+            /dev/shm/apti-v5/public.pem /dev/shm/apti-v5/exchange.done
+
+      - name: Install host diagnostics
+        run: |
+          set -Eeuo pipefail
+          python3 -m pip install --disable-pip-version-check -q websocket-client frida-tools cryptography pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq unzip xz-utils sqlite3 >/dev/null
+          chmod 700 scripts/apti_v5_variant.py scripts/apti_v5_wrapper.sh scripts/apti_v5_publish_result.py
+          chmod 700 scripts/apti_v4_probe.py scripts/apti_v4_cdp.py
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Boot Android 15 and run clean login before instrumentation
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_5
+          cores: 2
+          ram-size: 4096M
+          heap-size: 768M
+          disable-animations: true
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -camera-back none -camera-front none -writable-system
+            -no-snapshot-save -no-snapshot-load -no-metrics
+          script: bash scripts/apti_v5_wrapper.sh
+
+      - name: Encrypt and publish result
+        if: always()
+        run: python3 scripts/apti_v5_publish_result.py
+
+      - name: Upload encrypted backup
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apti-v5-encrypted-result-${{ github.run_id }}
+          path: apti-results-v5/result-${{ github.run_id }}.*
+          if-no-files-found: error
+          retention-days: 1

@@ -10,6 +10,7 @@ on:
       - scripts/apti_bundle_part_01
       - scripts/apti_bundle_part_02
       - scripts/apti_emulator_wrapper.sh
+      - scripts/apti_emulator_wrapper_stable.sh
       - scripts/apti_exact_https_probe.py
       - scripts/apti_handshake_prepare.sh
       - scripts/apti_handshake_receive.sh
@@ -23,12 +24,12 @@ env:
   APTI_XAPK_URL: https://d.apkpure.net/b/XAPK/aptip.app?version=latest
   APTI_XAPK_SHA256: 5484493059885e8ae8d070a147e47459238eeafde2eb8d6737d9ed756510744b
   APTI_CREDENTIALS_FILE: /dev/shm/apti-creds.json
-  APTI_PROBE_REVISION: exact-original-https-r4-memory-retained
+  APTI_PROBE_REVISION: exact-original-https-r5-gms-stable
 
 jobs:
   secure-login-probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 85
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -39,7 +40,7 @@ jobs:
           echo "d3c48ce5094e308f6e9aa7a22eab84327a0841fde35a7ef5f657d647b987c9f6  /tmp/apti-secure-scripts.tar.gz" | sha256sum -c -
           tar -xzf /tmp/apti-secure-scripts.tar.gz -C scripts
           chmod 700 scripts/apti_secure_probe.py scripts/apti_secure_cdp.py scripts/apti_exact_https_probe.py
-          chmod 700 scripts/apti_emulator_wrapper.sh scripts/apti_handshake_prepare.sh scripts/apti_handshake_receive.sh scripts/apti_encrypt_outputs.py
+          chmod 700 scripts/apti_emulator_wrapper.sh scripts/apti_emulator_wrapper_stable.sh scripts/apti_handshake_prepare.sh scripts/apti_handshake_receive.sh scripts/apti_encrypt_outputs.py
           rm -f /tmp/apti-secure-scripts.tar.gz
 
       - name: Generate one-time credential exchange key
@@ -70,7 +71,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Boot Android 15 with Chrome and run authenticated probe
+      - name: Boot Android 15, wait for GMS stabilization, then run probe
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
@@ -85,7 +86,7 @@ jobs:
             -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
             -camera-back none -camera-front none
             -no-snapshot-save -no-snapshot-load
-          script: bash scripts/apti_emulator_wrapper.sh
+          script: bash scripts/apti_emulator_wrapper_stable.sh
 
       - name: Encrypt all probe outputs
         if: always()

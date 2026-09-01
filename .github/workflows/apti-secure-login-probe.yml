@@ -143,7 +143,7 @@ jobs:
             -camera-back none -camera-front none -writable-system
             -no-snapshot-save -no-snapshot-load
           script: |
-            set -euo pipefail
+            set -eu
             (
               for _ in $(seq 1 180); do
                 adb shell uiautomator dump /sdcard/apti-autoclick.xml >/dev/null 2>&1 || true

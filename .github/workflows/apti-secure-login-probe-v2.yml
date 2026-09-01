@@ -23,7 +23,7 @@ env:
   APTI_XAPK_URL: https://d.apkpure.net/b/XAPK/aptip.app?version=latest
   APTI_XAPK_SHA256: 5484493059885e8ae8d070a147e47459238eeafde2eb8d6737d9ed756510744b
   APTI_CREDENTIALS_FILE: /dev/shm/apti-creds.json
-  APTI_PROBE_REVISION: exact-original-https-r2
+  APTI_PROBE_REVISION: exact-original-https-r3-replay
 
 jobs:
   secure-login-probe:

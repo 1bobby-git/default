@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 env:
-  APTI_VERSION: "3.3.59"
+  APTI_VERSION: "3.3.45"
 
 jobs:
   static-analysis:

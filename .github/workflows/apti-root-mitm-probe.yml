@@ -1,0 +1,95 @@
+name: Temporary Apti root MITM probe
+
+on:
+  push:
+    branches:
+      - analysis/apti-emulator-20260901
+    paths:
+      - .github/workflows/apti-root-mitm-probe.yml
+      - scripts/apti_root_mitm_wrapper.sh
+      - scripts/apti_root_mitm_addon.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APTI_XAPK_URL: https://d.apkpure.net/b/XAPK/aptip.app?version=latest
+  APTI_XAPK_SHA256: 5484493059885e8ae8d070a147e47459238eeafde2eb8d6737d9ed756510744b
+  APTI_CREDENTIALS_FILE: /dev/shm/apti-creds.json
+  APTI_PROBE_REVISION: root-mitm-login-event-r1
+
+jobs:
+  root-mitm-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct encrypted probe helpers
+        run: |
+          set -euo pipefail
+          cat scripts/apti_bundle_part_00 scripts/apti_bundle_part_01 scripts/apti_bundle_part_02 | base64 -d > /tmp/apti-secure-scripts.tar.gz
+          echo "d3c48ce5094e308f6e9aa7a22eab84327a0841fde35a7ef5f657d647b987c9f6  /tmp/apti-secure-scripts.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/apti-secure-scripts.tar.gz -C scripts
+          chmod 700 scripts/apti_exact_https_probe.py scripts/apti_handshake_prepare.sh scripts/apti_handshake_receive.sh scripts/apti_encrypt_outputs.py
+          chmod 700 scripts/apti_root_mitm_wrapper.sh
+          rm -f /tmp/apti-secure-scripts.tar.gz
+
+      - name: Generate one-time credential exchange key
+        run: bash scripts/apti_handshake_prepare.sh
+
+      - name: Publish one-time public key
+        uses: actions/upload-artifact@v4
+        with:
+          name: apti-handshake-${{ github.run_id }}
+          path: apti-handshake-public/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Receive encrypted credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/apti_handshake_receive.sh
+
+      - name: Install host tools
+        run: |
+          python3 -m pip install --disable-pip-version-check -q mitmproxy websocket-client cryptography
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq unzip xz-utils >/dev/null
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Boot rootable Android 15 and capture authenticated traffic
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_5
+          cores: 2
+          ram-size: 4096M
+          heap-size: 768M
+          disable-animations: true
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -camera-back none -camera-front none
+            -no-snapshot-save -no-snapshot-load -writable-system
+          script: bash scripts/apti_root_mitm_wrapper.sh
+
+      - name: Encrypt all probe outputs
+        if: always()
+        run: python3 scripts/apti_encrypt_outputs.py
+
+      - name: Upload encrypted result only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apti-encrypted-result-${{ github.run_id }}
+          path: apti-encrypted-output/
+          if-no-files-found: error
+          retention-days: 1

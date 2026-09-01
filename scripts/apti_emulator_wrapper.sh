@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ui_helper_pid=""
 login_logcat_pid=""
 tcpdump_pid=""
 dnsdump_pid=""
@@ -19,10 +18,6 @@ cleanup() {
     kill "$login_logcat_pid" >/dev/null 2>&1 || true
     wait "$login_logcat_pid" >/dev/null 2>&1 || true
   fi
-  if [[ -n "${ui_helper_pid:-}" ]]; then
-    kill "$ui_helper_pid" >/dev/null 2>&1 || true
-    wait "$ui_helper_pid" >/dev/null 2>&1 || true
-  fi
   if [[ -n "${tmp_dir:-}" ]]; then
     rm -rf "$tmp_dir"
   fi
@@ -32,7 +27,7 @@ trap cleanup EXIT
 export APTI_SECURE_RESULT_DIR="${GITHUB_WORKSPACE}/.apti-sensitive-results"
 exact_dir="$APTI_SECURE_RESULT_DIR/exact-original-https"
 mkdir -p "$exact_dir"
-tmp_dir="$(mktemp -d -t apti-clean-probe-XXXXXX)"
+tmp_dir="$(mktemp -d -t apti-serial-probe-XXXXXX)"
 
 python3 - <<'PY'
 from pathlib import Path
@@ -58,6 +53,32 @@ if keyboard_old not in text:
     raise SystemExit("exact probe keyboard selection block was not found")
 text = text.replace(keyboard_old, keyboard_new, 1)
 
+prep_old = '''        labels = current_labels(root)
+        write_json(result_dir / f"login-prep-{attempt:02d}-labels.json", labels)
+
+        if any("아이디" in label for label in labels) and any("비밀번호" in label for label in labels):'''
+prep_new = '''        labels = current_labels(root)
+        write_json(result_dir / f"login-prep-{attempt:02d}-labels.json", labels)
+        screenshot(result_dir, f"login-prep-{attempt:02d}")
+
+        if any("아이디" in label for label in labels) and any("비밀번호" in label for label in labels):'''
+if prep_old not in text:
+    raise SystemExit("exact probe login preparation block was not found")
+text = text.replace(prep_old, prep_new, 1)
+
+submit_old = '''    login_candidates: list[tuple[int, ET.Element]] = []
+    for node in find_nodes(root, lambda _: True):'''
+submit_new = '''    adb_shell("input", "keyevent", "111", quiet=True)
+    time.sleep(0.8)
+    root = dump_ui(result_dir, "login-ready-to-submit", credentials)
+    screenshot(result_dir, "login-ready-to-submit")
+
+    login_candidates: list[tuple[int, ET.Element]] = []
+    for node in find_nodes(root, lambda _: True):'''
+if submit_old not in text:
+    raise SystemExit("exact probe login submit preparation block was not found")
+text = text.replace(submit_old, submit_new, 1)
+
 resolver_old = '''                for options in (
                     ["Chrome", "크롬"], ["한 번만", "Just once"],
                     ["동의하고 계속", "Accept & continue"],
@@ -74,30 +95,62 @@ resolver_new = '''                for options in (
 if resolver_old not in text:
     raise SystemExit("exact probe Chrome resolver block was not found")
 text = text.replace(resolver_old, resolver_new, 1)
-
-submit_old = '''    login_candidates.sort(key=lambda item: item[0], reverse=True)
-    tap_node(login_candidates[0][1])
-    result["login_clicked"] = True
-    time.sleep(2)
-
-    observations: list[dict[str, Any]] = []'''
-submit_new = '''    login_candidates.sort(key=lambda item: item[0], reverse=True)
-    tap_node(login_candidates[0][1])
-    result["login_clicked"] = True
-    time.sleep(1.2)
-
-    retry_root = dump_ui(result_dir, "login-submit-retry", credentials)
-    result["login_retry_clicked"] = tap_label(retry_root, ["로그인"], min_y=500)
-    if result["login_retry_clicked"]:
-        time.sleep(2)
-
-    observations: list[dict[str, Any]] = []'''
-if submit_old not in text:
-    raise SystemExit("exact probe login submission block was not found")
-text = text.replace(submit_old, submit_new, 1)
-
 path.write_text(text, encoding="utf-8")
 PY
+
+cat > "$tmp_dir/ui_action.py" <<'PY'
+#!/usr/bin/env python3
+from __future__ import annotations
+import sys
+import xml.etree.ElementTree as ET
+
+path = sys.argv[1]
+try:
+    root = ET.parse(path).getroot()
+except Exception:
+    print("none 0 0 0")
+    raise SystemExit(0)
+
+def label(node):
+    return (node.attrib.get("text") or node.attrib.get("content-desc") or "").replace("\n", "").replace(" ", "")
+
+def center(node):
+    raw = node.attrib.get("bounds", "")
+    try:
+        a, b = raw.split("][")
+        x1, y1 = [int(v) for v in a.strip("[").split(",")]
+        x2, y2 = [int(v) for v in b.strip("]").split(",")]
+        return (x1 + x2) // 2, (y1 + y2) // 2
+    except Exception:
+        return None
+
+nodes = list(root.iter("node"))
+editable = [n for n in nodes if "EditText" in n.attrib.get("class", "") or n.attrib.get("editable") == "true"]
+if len(editable) >= 2:
+    print(f"ready 0 0 {len(editable)}")
+    raise SystemExit(0)
+
+for wanted, action in (("시작하기", "start"), ("로그인", "login")):
+    candidates = []
+    for node in nodes:
+        xy = center(node)
+        if not xy or label(node) != wanted:
+            continue
+        score = (100000 if node.attrib.get("clickable") == "true" else 0) + xy[1]
+        candidates.append((score, xy))
+    if candidates:
+        candidates.sort(reverse=True)
+        x, y = candidates[0][1]
+        print(f"{action} {x} {y} {len(editable)}")
+        raise SystemExit(0)
+
+labels = {label(n) for n in nodes if label(n)}
+if "이용하기" in labels and any("커뮤니티" in item for item in labels):
+    print(f"community 0 0 {len(editable)}")
+else:
+    print(f"none 0 0 {len(editable)}")
+PY
+chmod 700 "$tmp_dir/ui_action.py"
 
 adb wait-for-device
 adb shell settings put global http_proxy :0 >/dev/null 2>&1 || true
@@ -123,7 +176,6 @@ if [[ -x "$build_tools/aapt" ]]; then
   "$build_tools/aapt" dump badging "$base_apk" > "$exact_dir/apk-badging.txt" 2>&1 || true
 fi
 
-adb shell am force-stop aptip.app >/dev/null 2>&1 || true
 adb shell am force-stop com.android.chrome >/dev/null 2>&1 || true
 adb shell am start -W \
   -n com.android.chrome/com.google.android.apps.chrome.Main \
@@ -131,13 +183,18 @@ adb shell am start -W \
   -d about:blank \
   > "$exact_dir/chrome-prime-start.txt" 2>&1 || true
 
-for index in $(seq 0 24); do
+for index in $(seq 0 20); do
   adb shell uiautomator dump /sdcard/chrome-prime.xml >/dev/null 2>&1 || true
   chrome_xml="$(adb shell cat /sdcard/chrome-prime.xml 2>/dev/null || true)"
   printf '%s' "$chrome_xml" > "$exact_dir/chrome-prime-${index}.xml"
 
   if grep -q 'com.android.chrome:id/signin_fre_dismiss_button' <<<"$chrome_xml"; then
     adb shell input tap 540 1977
+    sleep 2
+    continue
+  fi
+  if grep -q 'com.android.chrome:id/negative_button' <<<"$chrome_xml" || grep -q 'text="No thanks"' <<<"$chrome_xml"; then
+    adb shell input tap 567 1745
     sleep 2
     continue
   fi
@@ -153,44 +210,53 @@ for index in $(seq 0 24); do
   fi
   sleep 1
 done
-
 adb exec-out screencap -p > "$exact_dir/chrome-prime-final.png" 2>/dev/null || true
 adb shell am force-stop com.android.chrome >/dev/null 2>&1 || true
 
-(
-  last_action=""
-  last_action_at=0
-  for _ in $(seq 1 480); do
-    adb shell uiautomator dump /sdcard/apti-autoclick.xml >/dev/null 2>&1 || true
-    xml="$(adb shell cat /sdcard/apti-autoclick.xml 2>/dev/null || true)"
-    now="$(date +%s)"
-    if grep -q 'content-desc="시작하기"' <<<"$xml" || grep -q 'text="시작하기"' <<<"$xml"; then
-      if [[ "$last_action" != "start" || $((now - last_action_at)) -ge 5 ]]; then
-        adb shell input tap 540 2153
-        last_action="start"
-        last_action_at="$now"
-      fi
-    elif grep -q 'content-desc="오늘 그만보기"' <<<"$xml" && grep -q 'content-desc="닫기"' <<<"$xml"; then
-      if [[ "$last_action" != "promo-close" || $((now - last_action_at)) -ge 5 ]]; then
-        adb shell input tap 961 2205
-        last_action="promo-close"
-        last_action_at="$now"
-      fi
-    fi
-    sleep 1
-  done
-) &
-ui_helper_pid=$!
+adb shell am force-stop aptip.app >/dev/null 2>&1 || true
+adb shell monkey -p aptip.app -c android.intent.category.LAUNCHER 1 > "$exact_dir/app-launch.txt" 2>&1 || true
 
-adb shell monkey -p aptip.app -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
-sleep 10
-adb shell settings put global http_proxy :0 >/dev/null 2>&1 || true
+login_ready=0
+for index in $(seq 0 24); do
+  sleep 1.5
+  adb shell uiautomator dump /sdcard/apti-serial-nav.xml >/dev/null 2>&1 || true
+  adb shell cat /sdcard/apti-serial-nav.xml > "$exact_dir/serial-nav-${index}.xml" 2>/dev/null || true
+  if [[ "$index" -le 8 || "$index" == "12" || "$index" == "18" || "$index" == "24" ]]; then
+    adb exec-out screencap -p > "$exact_dir/serial-nav-${index}.png" 2>/dev/null || true
+  fi
+
+  read -r action x y editable_count < <(python3 "$tmp_dir/ui_action.py" "$exact_dir/serial-nav-${index}.xml")
+  printf '%s\t%s\t%s\t%s\t%s\n' "$index" "$action" "$x" "$y" "$editable_count" >> "$exact_dir/serial-navigation.tsv"
+  case "$action" in
+    ready)
+      login_ready=1
+      break
+      ;;
+    start|login)
+      adb shell input tap "$x" "$y"
+      sleep 2.5
+      ;;
+    community)
+      adb shell input keyevent 4
+      sleep 2
+      adb shell input tap 540 2180
+      sleep 2
+      ;;
+    none)
+      ;;
+  esac
+done
+printf '%s\n' "$login_ready" > "$exact_dir/login-page-ready.txt"
+adb exec-out screencap -p > "$exact_dir/manual-login-page.png" 2>/dev/null || true
+adb shell uiautomator dump /sdcard/apti-manual-login.xml >/dev/null 2>&1 || true
+adb shell cat /sdcard/apti-manual-login.xml > "$exact_dir/manual-login-page.xml" 2>/dev/null || true
 
 sudo apt-get install -y -qq tcpdump >/dev/null
+adb shell settings put global http_proxy :0 >/dev/null 2>&1 || true
 adb shell logcat -c >/dev/null 2>&1 || true
 adb logcat -v threadtime > "$exact_dir/login-and-launch-logcat.txt" 2>&1 &
 login_logcat_pid=$!
-sudo tcpdump -i any -nn -s0 -U -w "$exact_dir/login-and-launch.pcap" '(udp port 53 or tcp port 53 or tcp port 443)' >/dev/null 2>&1 &
+sudo tcpdump -i any -nn -s160 -U -w "$exact_dir/login-and-launch.pcap" '(udp port 53 or tcp port 53 or tcp port 443)' >/dev/null 2>&1 &
 tcpdump_pid=$!
 sudo tcpdump -i any -nn -l -A '(udp port 53 or tcp port 53)' > "$exact_dir/login-dns.txt" 2>&1 &
 dnsdump_pid=$!
@@ -200,7 +266,7 @@ python3 scripts/apti_exact_https_probe.py --credentials "${APTI_CREDENTIALS_FILE
 exact_probe_rc=$?
 set -e
 printf '%s\n' "$exact_probe_rc" > "$APTI_SECURE_RESULT_DIR/exact-https-probe-return-code.txt"
-printf '%s\n' 'manual-clean-install' > "$APTI_SECURE_RESULT_DIR/legacy-probe-return-code.txt"
+printf '%s\n' 'manual-serialized-install' > "$APTI_SECURE_RESULT_DIR/legacy-probe-return-code.txt"
 
 sudo kill "$dnsdump_pid" >/dev/null 2>&1 || true
 wait "$dnsdump_pid" >/dev/null 2>&1 || true

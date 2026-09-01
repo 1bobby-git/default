@@ -1,0 +1,66 @@
+name: Temporary Apti APK static analysis
+
+on:
+  push:
+    branches:
+      - analysis/apti-emulator-20260901
+    paths:
+      - .github/workflows/apti-apk-static-analysis.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APTI_XAPK_URL: https://d.apkpure.net/b/XAPK/aptip.app?version=latest
+  APTI_XAPK_SHA256: 5484493059885e8ae8d070a147e47459238eeafde2eb8d6737d9ed756510744b
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download and inspect APK bundle
+        run: |
+          set -euo pipefail
+          mkdir -p apti-apk-analysis/xapk apti-apk-analysis/base
+          curl -fL --retry 5 --retry-delay 2 "$APTI_XAPK_URL" -o /tmp/apti.xapk
+          printf '%s  %s\n' "$APTI_XAPK_SHA256" /tmp/apti.xapk | sha256sum -c -
+          unzip -q /tmp/apti.xapk -d apti-apk-analysis/xapk
+          base_apk="$(find apti-apk-analysis/xapk -type f -name 'aptip.app.apk' -print -quit)"
+          test -n "$base_apk"
+          unzip -q "$base_apk" -d apti-apk-analysis/base
+          cp "$base_apk" apti-apk-analysis/aptip.app.apk
+
+          build_tools="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          "$build_tools/aapt" dump badging "$base_apk" > apti-apk-analysis/aapt-badging.txt
+          "$build_tools/aapt" dump xmltree "$base_apk" AndroidManifest.xml > apti-apk-analysis/manifest-xmltree.txt
+          find apti-apk-analysis/base -type f -printf '%P\t%s\n' | sort > apti-apk-analysis/file-list.tsv
+          find apti-apk-analysis/base -type f -name '*.so' -printf '%P\t%s\n' | sort > apti-apk-analysis/native-libraries.tsv
+
+          libapp="$(find apti-apk-analysis/base -type f -path '*/libapp.so' | head -1)"
+          test -n "$libapp"
+          strings -a -n 4 -t x "$libapp" > apti-apk-analysis/libapp-strings-with-offsets.txt
+          grep -Ein -C 12 'V2LoginApi|login|sign.?in|password|member|credential|mbl[-_]?token|access[-_]?token|refresh[-_]?token|/api/|https?://|azweb|apti\.co\.kr|app_links|flutter_inappwebview|integrity|attest|device.?id' \
+            apti-apk-analysis/libapp-strings-with-offsets.txt \
+            > apti-apk-analysis/libapp-login-api-context.txt || true
+
+          find apti-apk-analysis/base -type f \( -name '*.json' -o -name '*.xml' -o -name '*.txt' -o -name '*.html' -o -name '*.js' -o -name '*.properties' \) -print0 \
+            | xargs -0 grep -EInI 'V2LoginApi|login|password|mbl[-_]?token|access[-_]?token|refresh[-_]?token|/api/|https?://|azweb|apti\.co\.kr|integrity|attest|networkSecurityConfig' \
+            > apti-apk-analysis/text-resource-hits.txt || true
+
+          grep -Eio 'https?://[^[:space:]"<>]+' apti-apk-analysis/libapp-strings-with-offsets.txt \
+            | sed 's/[),;]$//' | sort -u > apti-apk-analysis/urls.txt || true
+          grep -Eio '/[A-Za-z0-9._~!$&()*+,;=:@%/-]*(api|login|auth|token)[A-Za-z0-9._~!$&()*+,;=:@%/?-]*' apti-apk-analysis/libapp-strings-with-offsets.txt \
+            | sort -u > apti-apk-analysis/api-path-candidates.txt || true
+
+          tar -C apti-apk-analysis -czf apti-apk-analysis/libapp-strings-with-offsets.txt.gz libapp-strings-with-offsets.txt
+          rm apti-apk-analysis/libapp-strings-with-offsets.txt apti-apk-analysis/aptip.app.apk
+
+      - name: Upload analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: apti-apk-static-${{ github.run_id }}
+          path: apti-apk-analysis/
+          if-no-files-found: error
+          retention-days: 1

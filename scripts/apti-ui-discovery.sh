@@ -72,7 +72,7 @@ adb root >/dev/null 2>&1 || true
 adb wait-for-device
 adb push "$WORK/frida-server" /data/local/tmp/frida-server >/dev/null
 adb shell chmod 755 /data/local/tmp/frida-server
-adb shell 'pkill -f frida-server || true'
+adb shell 'killall frida-server 2>/dev/null || true'
 adb shell '/data/local/tmp/frida-server >/data/local/tmp/frida-server.log 2>&1 &' || true
 sleep 2
 

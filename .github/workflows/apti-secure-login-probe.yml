@@ -143,7 +143,25 @@ jobs:
             -camera-back none -camera-front none -writable-system
             -no-snapshot-save -no-snapshot-load
           script: |
+            set -euo pipefail
+            (
+              for _ in $(seq 1 180); do
+                adb shell uiautomator dump /sdcard/apti-autoclick.xml >/dev/null 2>&1 || true
+                if adb shell cat /sdcard/apti-autoclick.xml 2>/dev/null | grep -q 'content-desc="시작하기"'; then
+                  adb shell input tap 540 2153
+                  exit 0
+                fi
+                sleep 1
+              done
+            ) &
+            ONBOARD_PID=$!
+            set +e
             python3 scripts/apti_secure_probe.py
+            PROBE_RC=$?
+            set -e
+            kill "$ONBOARD_PID" >/dev/null 2>&1 || true
+            wait "$ONBOARD_PID" >/dev/null 2>&1 || true
+            exit "$PROBE_RC"
 
       - name: Encrypt all probe outputs
         if: always()

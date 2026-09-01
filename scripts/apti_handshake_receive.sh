@@ -5,26 +5,48 @@ umask 077
 : "${GH_TOKEN:?GH_TOKEN is required}"
 : "${APTI_CREDENTIALS_FILE:=/dev/shm/apti-creds.json}"
 
-payload_path="apti-handshake/payload-${GITHUB_RUN_ID}.b64"
-ref_encoded="analysis%2Fapti-emulator-20260901"
-api_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${payload_path}?ref=${ref_encoded}"
+mkdir -p /dev/shm/apti-handshake
 found=0
 
-for _ in $(seq 1 360); do
-  if curl -fsSL \
-    -H "Accept: application/vnd.github+json" \
-    -H "Authorization: Bearer ${GH_TOKEN}" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "$api_url" > /dev/shm/apti-handshake/api.json 2>/dev/null; then
-    jq -r '.content' /dev/shm/apti-handshake/api.json | tr -d '\n' | base64 -d \
-      > /dev/shm/apti-handshake/payload.txt
-    base64 -d /dev/shm/apti-handshake/payload.txt \
-      > /dev/shm/apti-handshake/payload.bin
-    found=1
-    break
-  fi
-  sleep 5
-done
+if [[ -n "${APTI_EXCHANGE_BASE_URL:-}" ]]; then
+  payload_url="${APTI_EXCHANGE_BASE_URL%/}/${GITHUB_RUN_ID}/payload.b64"
+
+  for _ in $(seq 1 360); do
+    if curl -fsS \
+      --retry 2 \
+      --retry-delay 1 \
+      --retry-all-errors \
+      "$payload_url" \
+      > /dev/shm/apti-handshake/payload.txt 2>/dev/null; then
+      if base64 -d /dev/shm/apti-handshake/payload.txt \
+        > /dev/shm/apti-handshake/payload.bin 2>/dev/null; then
+        found=1
+        break
+      fi
+    fi
+    sleep 5
+  done
+else
+  payload_path="apti-handshake/payload-${GITHUB_RUN_ID}.b64"
+  ref_encoded="analysis%2Fapti-emulator-20260901"
+  api_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${payload_path}?ref=${ref_encoded}"
+
+  for _ in $(seq 1 360); do
+    if curl -fsSL \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer ${GH_TOKEN}" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "$api_url" > /dev/shm/apti-handshake/api.json 2>/dev/null; then
+      jq -r '.content' /dev/shm/apti-handshake/api.json | tr -d '\n' | base64 -d \
+        > /dev/shm/apti-handshake/payload.txt
+      base64 -d /dev/shm/apti-handshake/payload.txt \
+        > /dev/shm/apti-handshake/payload.bin
+      found=1
+      break
+    fi
+    sleep 5
+  done
+fi
 
 if [[ "$found" -ne 1 ]]; then
   echo 'Encrypted credential payload was not received.'

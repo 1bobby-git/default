@@ -9,15 +9,20 @@ on:
       - scripts/apti-static-probe.sh
       - scripts/apti-runtime-probe.sh
       - scripts/apti-frida-hook.js
+      - scripts/apti-cdp-capture.py
+      - scripts/apti-mitm-addon.py
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  APTI_VERSION: "3.3.59"
+
 jobs:
   static-analysis:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
       - name: Download and analyze Apti APK
@@ -28,7 +33,41 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: apti-static-analysis
+          name: apti-static-analysis-v2
           path: apti-analysis/
+          if-no-files-found: warn
+          retention-days: 1
+
+  android-emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Boot Android 11 and probe Apti
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          profile: pixel_5
+          disable-animations: true
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -camera-back none -camera-front none
+          script: |
+            chmod +x scripts/apti-runtime-probe.sh
+            scripts/apti-runtime-probe.sh
+      - name: Upload runtime logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apti-android-runtime
+          path: apti-runtime-results/
           if-no-files-found: warn
           retention-days: 1

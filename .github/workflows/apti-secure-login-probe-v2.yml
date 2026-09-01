@@ -10,6 +10,7 @@ on:
       - scripts/apti_bundle_part_01
       - scripts/apti_bundle_part_02
       - scripts/apti_emulator_wrapper.sh
+      - scripts/apti_exact_https_probe.py
       - scripts/apti_handshake_prepare.sh
       - scripts/apti_handshake_receive.sh
       - scripts/apti_encrypt_outputs.py
@@ -26,7 +27,7 @@ env:
 jobs:
   secure-login-probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +37,7 @@ jobs:
           cat scripts/apti_bundle_part_00 scripts/apti_bundle_part_01 scripts/apti_bundle_part_02 | base64 -d > /tmp/apti-secure-scripts.tar.gz
           echo "d3c48ce5094e308f6e9aa7a22eab84327a0841fde35a7ef5f657d647b987c9f6  /tmp/apti-secure-scripts.tar.gz" | sha256sum -c -
           tar -xzf /tmp/apti-secure-scripts.tar.gz -C scripts
-          chmod 700 scripts/apti_secure_probe.py scripts/apti_secure_cdp.py
+          chmod 700 scripts/apti_secure_probe.py scripts/apti_secure_cdp.py scripts/apti_exact_https_probe.py
           chmod 700 scripts/apti_emulator_wrapper.sh scripts/apti_handshake_prepare.sh scripts/apti_handshake_receive.sh scripts/apti_encrypt_outputs.py
           rm -f /tmp/apti-secure-scripts.tar.gz
 
@@ -68,12 +69,12 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Boot Android 15 and run authenticated probe
+      - name: Boot Android 15 with Chrome and run authenticated probe
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
           arch: x86_64
-          target: google_apis
+          target: google_apis_playstore
           profile: pixel_5
           cores: 2
           ram-size: 4096M
@@ -81,7 +82,7 @@ jobs:
           disable-animations: true
           emulator-options: >-
             -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
-            -camera-back none -camera-front none -writable-system
+            -camera-back none -camera-front none
             -no-snapshot-save -no-snapshot-load
           script: bash scripts/apti_emulator_wrapper.sh
 

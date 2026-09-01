@@ -50,7 +50,11 @@ if old not in text:
 path.write_text(text.replace(old, new, 1), encoding="utf-8")
 PY
 
-echo 'skipped: exact HTTPS revision runs the corrected login probe only' > "$APTI_SECURE_RESULT_DIR/legacy-probe-return-code.txt"
+set +e
+python3 scripts/apti_secure_probe.py
+legacy_probe_rc=$?
+set -e
+printf '%s\n' "$legacy_probe_rc" > "$APTI_SECURE_RESULT_DIR/legacy-probe-return-code.txt"
 
 set +e
 python3 scripts/apti_exact_https_probe.py --credentials "${APTI_CREDENTIALS_FILE:-/dev/shm/apti-creds.json}" --result-dir "$APTI_SECURE_RESULT_DIR"

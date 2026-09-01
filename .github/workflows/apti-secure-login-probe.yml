@@ -1,0 +1,183 @@
+name: Temporary secure Apti login probe
+
+on:
+  push:
+    branches:
+      - analysis/apti-emulator-20260901
+    paths:
+      - .github/workflows/apti-secure-login-probe.yml
+      - scripts/apti_bundle_part_00
+      - scripts/apti_bundle_part_01
+      - scripts/apti_bundle_part_02
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APTI_XAPK_URL: https://d.apkpure.net/b/XAPK/aptip.app?version=latest
+  APTI_XAPK_SHA256: 5484493059885e8ae8d070a147e47459238eeafde2eb8d6737d9ed756510744b
+  APTI_CREDENTIALS_FILE: /dev/shm/apti-creds.json
+
+jobs:
+  secure-login-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct probe scripts
+        run: |
+          set -euo pipefail
+          cat scripts/apti_bundle_part_00 scripts/apti_bundle_part_01 scripts/apti_bundle_part_02 | base64 -d > /tmp/apti-secure-scripts.tar.gz
+          echo "d3c48ce5094e308f6e9aa7a22eab84327a0841fde35a7ef5f657d647b987c9f6  /tmp/apti-secure-scripts.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/apti-secure-scripts.tar.gz -C scripts
+          chmod 700 scripts/apti_secure_probe.py scripts/apti_secure_cdp.py
+          rm -f /tmp/apti-secure-scripts.tar.gz
+
+      - name: Generate one-time credential exchange key
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p /dev/shm/apti-handshake apti-handshake-public
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out /dev/shm/apti-handshake/private.pem
+          openssl pkey -in /dev/shm/apti-handshake/private.pem -pubout -out apti-handshake-public/public.pem
+          printf '%s\n' "$GITHUB_RUN_ID" > apti-handshake-public/run-id.txt
+          printf '%s\n' "$GITHUB_SHA" > apti-handshake-public/commit-sha.txt
+          python3 - <<'PY'
+          import secrets
+          from pathlib import Path
+          Path('apti-handshake-public/nonce.txt').write_text(secrets.token_hex(24)+'\n', encoding='utf-8')
+          PY
+
+      - name: Publish one-time public key
+        uses: actions/upload-artifact@v4
+        with:
+          name: apti-handshake-${{ github.run_id }}
+          path: apti-handshake-public/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Wait for encrypted credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          PAYLOAD_PATH="apti-handshake/payload-${GITHUB_RUN_ID}.b64"
+          REF_ENCODED="analysis%2Fapti-emulator-20260901"
+          API_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${PAYLOAD_PATH}?ref=${REF_ENCODED}"
+          FOUND=0
+          for _ in $(seq 1 360); do
+            if curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$API_URL" > /dev/shm/apti-handshake/api.json 2>/dev/null; then
+              jq -r '.content' /dev/shm/apti-handshake/api.json | tr -d '\n' | base64 -d > /dev/shm/apti-handshake/payload.txt
+              base64 -d /dev/shm/apti-handshake/payload.txt > /dev/shm/apti-handshake/payload.bin
+              FOUND=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "$FOUND" -ne 1 ]; then
+            echo 'Encrypted credential payload was not received in time.'
+            exit 20
+          fi
+          openssl pkeyutl -decrypt \
+            -inkey /dev/shm/apti-handshake/private.pem \
+            -in /dev/shm/apti-handshake/payload.bin \
+            -out "$APTI_CREDENTIALS_FILE" \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256
+          python3 - <<'PY'
+          import base64, json, os
+          from pathlib import Path
+          p=Path(os.environ['APTI_CREDENTIALS_FILE'])
+          data=json.loads(p.read_text(encoding='utf-8'))
+          assert isinstance(data.get('username'), str) and data['username']
+          assert isinstance(data.get('password'), str) and data['password']
+          key=base64.b64decode(data.get('result_key_b64',''), validate=True)
+          assert len(key)==32
+          Path('/dev/shm/apti-result-key.bin').write_bytes(key)
+          p.chmod(0o600)
+          PY
+          APTI_USER="$(jq -r '.username' "$APTI_CREDENTIALS_FILE")"
+          APTI_PASS="$(jq -r '.password' "$APTI_CREDENTIALS_FILE")"
+          RESULT_KEY_B64="$(jq -r '.result_key_b64' "$APTI_CREDENTIALS_FILE")"
+          echo "::add-mask::$APTI_USER"
+          echo "::add-mask::$APTI_PASS"
+          echo "::add-mask::$RESULT_KEY_B64"
+          shred -u /dev/shm/apti-handshake/payload.bin /dev/shm/apti-handshake/payload.txt /dev/shm/apti-handshake/api.json /dev/shm/apti-handshake/private.pem || true
+          rm -rf apti-handshake-public
+          echo 'Encrypted credentials received and validated.'
+
+      - name: Install host analysis tools
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -q mitmproxy websocket-client frida-tools cryptography
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq unzip xz-utils >/dev/null
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Boot Android 12 and run authenticated probe
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 31
+          arch: x86_64
+          target: google_apis
+          profile: pixel_5
+          cores: 2
+          ram-size: 4096M
+          heap-size: 768M
+          disable-animations: true
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -camera-back none -camera-front none -writable-system
+            -no-snapshot-save -no-snapshot-load
+          script: |
+            python3 scripts/apti_secure_probe.py
+
+      - name: Encrypt all probe outputs
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p apti-encrypted-output
+          python3 - <<'PY'
+          import os, tarfile, tempfile
+          from pathlib import Path
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          root=Path(os.environ['GITHUB_WORKSPACE'])
+          src=root/'.apti-sensitive-results'
+          out=root/'apti-encrypted-output'/f'apti-results-{os.environ["GITHUB_RUN_ID"]}.bin'
+          if not src.exists():
+              src.mkdir(parents=True)
+              (src/'probe-status.txt').write_text('Probe produced no result directory.\n', encoding='utf-8')
+          with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as fp:
+              archive=Path(fp.name)
+          with tarfile.open(archive, 'w:gz') as tf:
+              tf.add(src, arcname='apti-results')
+          key=Path('/dev/shm/apti-result-key.bin').read_bytes()
+          nonce=os.urandom(12)
+          ciphertext=AESGCM(key).encrypt(nonce, archive.read_bytes(), b'APTI-RESULTS-v1')
+          out.write_bytes(b'APTIR1'+nonce+ciphertext)
+          archive.unlink(missing_ok=True)
+          PY
+          rm -rf .apti-sensitive-results
+          shred -u "$APTI_CREDENTIALS_FILE" /dev/shm/apti-result-key.bin 2>/dev/null || true
+
+      - name: Upload encrypted result only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apti-encrypted-result-${{ github.run_id }}
+          path: apti-encrypted-output/
+          if-no-files-found: error
+          retention-days: 1

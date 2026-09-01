@@ -127,10 +127,10 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Boot Android 12 and run authenticated probe
+      - name: Boot Android 15 and run authenticated probe
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 31
+          api-level: 35
           arch: x86_64
           target: google_apis
           profile: pixel_5
